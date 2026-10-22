@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f8f2" />
+    <meta
+      name="description"
+      content="Playground 玩点：发现即点即玩的 H5 小游戏，把你的创意变成下一款好玩的游戏。"
+    />
+    <title>Playground 玩点 · 让快乐，即刻发生</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="header">
+      <div class="header-inner">
+        <a href="#" class="brand" aria-label="Playground 首页"
+          ><span class="brand-icon">p<span>✦</span></span
+          ><span>playground<span class="brand-zh">玩点</span></span></a
+        >
+        <nav aria-label="主导航">
+          <a href="#" data-nav="home">发现游戏</a
+          ><a href="#templates" data-nav="templates"
+            >灵感模板 <span class="tiny-badge">NEW</span></a
+          ><a href="#mine" data-nav="mine">我的作品</a>
+        </nav>
+        <div class="header-actions" id="account"></div>
+      </div>
+    </header>
+    <main id="app"></main>
+    <footer>
+      <a class="footer-brand" href="#">✦ playground 玩点</a
+      ><span>小小的游戏，大大的快乐。</span
+      ><span class="footer-right">MADE FOR THE JOY OF PLAY <span>↗</span></span>
+    </footer>
+    <dialog id="auth-dialog"></dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
