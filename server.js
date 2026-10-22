@@ -11,6 +11,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { templates, gameDocument, gamePolicy } from "./public/templates.js";
+import { createWorld } from "./world.js";
+import { CLASSES } from "./public/world-rules.js";
 const scrypt = promisify(scryptCallback),
   root = dirname(fileURLToPath(import.meta.url));
 const dataDir = resolve(process.env.DATA_DIR || join(root, ".data"));
@@ -36,6 +38,11 @@ for (const g of templates)
     Date.now(),
   );
 const summary = `g.id,g.owner,g.title,g.description,g.category,g.cover,g.published,g.plays,g.created,g.updated,COALESCE(u.username,'Playground 官方') AS author`;
+const world = createWorld(db);
+const worldTimer = setInterval(() => {
+  try { world.tick(); } catch (error) { console.error("World tick failed", error); }
+}, 50);
+worldTimer.unref();
 const digest = (t) => createHash("sha256").update(t).digest("hex");
 function user(req) {
   const token = req.headers.cookie?.match(
@@ -51,6 +58,12 @@ function user(req) {
 }
 function fail(status, message) {
   throw Object.assign(new Error(message), { status });
+}
+function guestUser(req) {
+  const token = req.headers.cookie?.match(/(?:^|;\s*)world_guest=([a-f0-9]{64})(?:;|$)/)?.[1];
+  if (!token) return null;
+  const row = db.prepare("SELECT id,expires FROM world_guests WHERE token=? AND expires>?").get(digest(token), Date.now());
+  return row ? { ...row, username:"游客_"+row.id.slice(-6), guest:true, token } : null;
 }
 async function body(req) {
   const chunks = [];
@@ -120,6 +133,9 @@ const staticFiles = {
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
   "/templates.js": ["templates.js", "text/javascript; charset=utf-8"],
+  "/world-client.js": ["world-client.js", "text/javascript; charset=utf-8"],
+  "/world-rules.js": ["world-rules.js", "text/javascript; charset=utf-8"],
+  "/world.css": ["world.css", "text/css; charset=utf-8"],
 };
 const server = http.createServer(async (req, res) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -133,7 +149,8 @@ const server = http.createServer(async (req, res) => {
   };
   try {
     const url = new URL(req.url, "http://localhost"),
-      path = url.pathname,
+      // Keep registration within the existing HttpOnly guest Cookie path.
+      path = url.pathname === "/api/world/register" ? "/api/register" : url.pathname,
       method = req.method,
       me = user(req);
     if (!["GET", "HEAD"].includes(method)) {
@@ -152,6 +169,37 @@ const server = http.createServer(async (req, res) => {
       }
       if (!req.headers["content-type"]?.startsWith("application/json"))
         fail(415, "请求需要 JSON 格式");
+    }
+    if (path.startsWith("/api/world")) {
+      if (path === "/api/world/guest" && method === "POST") {
+        if (me) fail(409, "你已登录，请使用账号角色进入世界");
+        rate(req);
+        const b = await body(req);
+        if (!Object.hasOwn(CLASSES, b.classId)) fail(400, "请选择一个职业");
+        let guest = guestUser(req);
+        const existing = !!guest, expires = Date.now()+604800000;
+        if (!guest) {
+          const id = "guest_"+randomBytes(12).toString("hex"), token = randomBytes(32).toString("hex");
+          guest = { id, token, expires, guest:true, username:"游客_"+id.slice(-6) };
+          db.prepare("INSERT INTO world_guests(id,token,expires) VALUES(?,?,?)").run(id,digest(token),expires);
+        }
+        guest.expires = expires;
+        let joined;
+        try { joined = world.join(guest,b); }
+        catch (error) { if (!existing) db.prepare("DELETE FROM world_guests WHERE id=?").run(guest.id); throw error; }
+        db.prepare("UPDATE world_guests SET expires=? WHERE id=?").run(expires,guest.id);
+        res.setHeader("Set-Cookie", `world_guest=${guest.token}; HttpOnly; SameSite=Lax; Path=/api/world; Max-Age=604800${process.env.COOKIE_SECURE === "1" ? "; Secure" : ""}`);
+        return send(200, joined);
+      }
+      const player = me || guestUser(req);
+      if (!player) fail(401, "请先选择游客试玩或登录账号");
+      if (path === "/api/world/character" && method === "GET") return send(200, { ...world.summary(player.id,!!player.guest), guestExpires:player.expires || null });
+      if (path === "/api/world/join" && method === "POST") {
+        rate(req);
+        return send(200, world.join(player, await body(req)));
+      }
+      if (path === "/api/world/action" && method === "POST") return send(200, world.action(player.id, await body(req)));
+      fail(404, "世界接口不存在");
     }
     if (path === "/api/preview" && method === "POST") {
       const b = await body(req);
@@ -189,25 +237,35 @@ const server = http.createServer(async (req, res) => {
         b.password.length > 128
       )
         fail(400, "用户名需 2–24 位字母、数字或中文；密码需 8–128 位");
-      let account;
+      let account, transfer = null;
+      const token = randomBytes(32).toString("hex");
       if (path === "/api/register") {
+        if (me) fail(409, "请先退出当前账号，再注册新账号");
+        const guest = guestUser(req);
+        if (!guest && /(?:^|;\s*)world_guest=[a-f0-9]{64}(?:;|$)/.test(req.headers.cookie || ""))
+          fail(409, "游客身份已失效，请重新进入游客试玩，或登录已注册的账号");
         const salt = randomBytes(16).toString("hex"),
           hash = (await scrypt(b.password, salt, 64)).toString("hex");
+        account = { id:randomBytes(12).toString("hex"), username:b.username };
+        db.exec("BEGIN IMMEDIATE");
         try {
           db.prepare("INSERT INTO users VALUES(?,?,?,?)").run(
-            randomBytes(12).toString("hex"),
+            account.id,
             b.username,
             hash,
             salt,
           );
+          if (guest) transfer = world.transferGuest(guest.id,account);
+          db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(digest(token),account.id,Date.now()+604800000);
+          db.exec("COMMIT");
         } catch (e) {
-          if (e.code?.includes("CONSTRAINT") || e.message.includes("UNIQUE"))
+          db.exec("ROLLBACK");
+          if (e.status) throw e;
+          if (e.message.includes("users.username"))
             fail(409, "用户名已被使用");
           throw e;
         }
-        account = db
-          .prepare("SELECT * FROM users WHERE username=?")
-          .get(b.username);
+        if (transfer) world.finishGuestTransfer(transfer);
       } else {
         account = db
           .prepare("SELECT * FROM users WHERE username=?")
@@ -222,20 +280,18 @@ const server = http.createServer(async (req, res) => {
           !timingSafeEqual(hash, Buffer.from(account.password, "hex"))
         )
           fail(401, "用户名或密码不正确");
+        db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(digest(token),account.id,Date.now()+604800000);
       }
-      const token = randomBytes(32).toString("hex");
       db.prepare("DELETE FROM sessions WHERE expires<?").run(Date.now());
-      db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
-        digest(token),
-        account.id,
-        Date.now() + 604800000,
-      );
+      const cookies = [`session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.COOKIE_SECURE === "1" ? "; Secure" : ""}`];
+      if (transfer) cookies.push(`world_guest=; HttpOnly; SameSite=Lax; Path=/api/world; Max-Age=0${process.env.COOKIE_SECURE === "1" ? "; Secure" : ""}`);
       res.setHeader(
         "Set-Cookie",
-        `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.COOKIE_SECURE === "1" ? "; Secure" : ""}`,
+        cookies,
       );
       return send(200, {
         user: { id: account.id, username: account.username },
+        guestProgressTransferred: !!transfer,
       });
     }
     if (path === "/api/logout" && method === "POST") {
@@ -338,3 +394,9 @@ server.listen(
   process.env.HOST || "0.0.0.0",
   () => console.log(`Playground is listening on port ${server.address().port}`),
 );
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => {
+  clearInterval(worldTimer);
+  world.close();
+  server.close(() => { db.close(); process.exit(0); });
+  setTimeout(() => process.exit(0), 3000).unref();
+});

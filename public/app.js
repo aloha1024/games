@@ -1,4 +1,6 @@
 import { templates } from "./templates.js";
+import { mountWorld } from "./world-client.js";
+let worldCleanup = null;
 const $ = (s) => document.querySelector(s),
   app = $("#app");
 const icons = {
@@ -36,6 +38,7 @@ let currentUser = null,
   editor = null,
   codeTab = "html",
   dirty = false,
+  editRevision = 0,
   renderVersion = 0,
   toastTimer,
   authSuccess;
@@ -84,10 +87,10 @@ function updateAccount() {
     }
   });
 }
-function openAuth(onSuccess) {
+function openAuth(onSuccess, register = false) {
   authSuccess = onSuccess;
   const dialog = $("#auth-dialog");
-  renderAuth(false);
+  renderAuth(register);
   if (!dialog.open) dialog.showModal();
 }
 function renderAuth(register) {
@@ -95,23 +98,26 @@ function renderAuth(register) {
   dialog.innerHTML = `<div class="dialog-top"><span class="brand">✦ playground</span><button class="close" aria-label="关闭">×</button></div><h2>${register ? "让创意，从这里开始" : "欢迎回到玩点"}</h2><p>${register ? "创建账号，把你的第一个小游戏分享给世界。" : "登录后继续创作，下一份快乐由你定义。"}</p><form id="auth-form"><label class="field">用户名<input name="username" autocomplete="username" placeholder="2–24 位中文、字母或数字" required minlength="2" maxlength="24"></label><label class="field">密码<input type="password" name="password" autocomplete="${register ? "new-password" : "current-password"}" placeholder="至少 8 位字符" required minlength="8" maxlength="128"></label><div class="form-error" role="alert"></div><button class="btn btn-primary" type="submit">${register ? "创建账号" : "登录"} ${icon("arrow")}</button></form><p class="auth-bottom">${register ? "已有账号？" : "第一次来？"} <button class="switch">${register ? "直接登录" : "免费注册"}</button></p>`;
   dialog.querySelector(".close").onclick = () => dialog.close();
   dialog.querySelector(".switch").onclick = () => renderAuth(!register);
+  if (register) dialog.querySelector('h2 + p').textContent = '创建账号后，当前浏览器的游客角色和进度会自动转入账号，无需重新开始。';
   dialog.querySelector("form").onsubmit = async (e) => {
     e.preventDefault();
     const button = e.target.querySelector("button[type=submit]");
     button.disabled = true;
     const values = Object.fromEntries(new FormData(e.target));
     try {
-      const data = await api(register ? "/api/register" : "/api/login", {
+      const data = await api(register ? "/api/world/register" : "/api/login", {
         method: "POST",
         body: values,
       });
       currentUser = data.user;
       updateAccount();
       dialog.close();
-      toast(register ? "账号已创建，开始创作吧！" : "欢迎回来！");
+      toast(data.guestProgressTransferred ? "注册成功！游客角色与全部进度已转入账号，继续冒险吧。" : register ? "账号已创建，开始创作吧！" : "欢迎回来！");
+      const didRefresh = !!authSuccess;
       authSuccess?.();
       authSuccess = null;
       if (location.hash === "#mine") render();
+      else if (location.hash === "#world" && !didRefresh) render();
     } catch (error) {
       dialog.querySelector(".form-error").textContent = error.message;
     } finally {
@@ -161,6 +167,10 @@ function home() {
     $("#games").scrollIntoView({ behavior: "smooth", block: "start" });
   };
   drawGames();
+  const worldBanner = document.createElement("section");
+  worldBanner.className = "world-banner";
+  worldBanner.innerHTML = '<div><span>多人冒险 · 账号存档</span><h2>星野纪元 <small>STARFALL ONLINE</small></h2><p>走进微光森林，和伙伴一起唤醒古老的星辉。</p></div><a href="#world">进入世界 ↗</a>';
+  $("#games").before(worldBanner);
 }
 function drawGames() {
   let shown = games.filter(
@@ -259,10 +269,12 @@ async function updatePreview(notify = false) {
   }
 }
 function preview() {
+  clearTimeout(livePreviewTimer);
   collectEditor();
   updatePreview(true);
 }
 function markDirty() {
+  editRevision++;
   dirty = true;
   $("#save-status").textContent = "有尚未保存的更改";
 }
@@ -316,7 +328,7 @@ async function studioPage(parts, version) {
       const start = e.target.selectionStart,
         end = e.target.selectionEnd;
       e.target.setRangeText("  ", start, end, "end");
-      markDirty();
+      e.target.dispatchEvent(new Event("input", { bubbles: true }));
     }
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
@@ -329,16 +341,32 @@ async function studioPage(parts, version) {
   document.querySelectorAll("[data-template]").forEach(
     (b) =>
       (b.onclick = () => {
-        if (dirty && !confirm("切换模板会替换当前代码，是否继续？")) return;
+        if (
+          dirty &&
+          !confirm("切换模板会替换代码，并更新默认作品信息，是否继续？")
+        )
+          return;
+        clearTimeout(livePreviewTimer);
+        collectEditor();
         const t = templates.find((t) => t.id === b.dataset.template);
+        const useDefaultTitle =
+          !editor.title.trim() ||
+          templates.some((item) => editor.title === "我的" + item.title);
+        const useDefaultDescription =
+          !editor.description.trim() ||
+          templates.some((item) => editor.description === item.description);
         Object.assign(editor, {
           html: t.html,
           css: t.css,
           js: t.js,
           cover: t.cover,
           category: t.category,
+          title: useDefaultTitle ? "我的" + t.title : editor.title,
+          description: useDefaultDescription ? t.description : editor.description,
         });
         $("#code").value = editor[codeTab];
+        $("#field-title").value = editor.title;
+        $("#field-description").value = editor.description;
         $("#field-cover").value = t.cover;
         $("#field-category").value = t.category;
         markDirty();
@@ -359,25 +387,49 @@ async function saveGame(publish) {
   }
   const save = $("#save"),
     pub = $("#publish");
+  if (save.disabled) return;
+  const savingEditor = editor,
+    savingVersion = renderVersion,
+    savedRevision = editRevision,
+    body = { ...savingEditor, published: publish || !!savingEditor.published };
+  const isCurrentEditor = () =>
+    editor === savingEditor &&
+    renderVersion === savingVersion &&
+    save.isConnected;
   save.disabled = pub.disabled = true;
+  $("#save-status").textContent = "正在保存…";
   try {
-    const body = { ...editor, published: publish || !!editor.published };
     const result = await api(
-      editor.id ? "/api/games/" + editor.id : "/api/games",
-      { method: editor.id ? "PUT" : "POST", body },
+      savingEditor.id ? "/api/games/" + savingEditor.id : "/api/games",
+      { method: savingEditor.id ? "PUT" : "POST", body },
     );
-    editor.id = result.id;
-    editor.published = body.published;
-    dirty = false;
-    $("#save-status").textContent = "所有更改已保存";
-    toast(publish ? "发布成功，让快乐被更多人发现！" : "作品已保存");
-    if (publish) location.hash = "#play/" + result.id;
+    savingEditor.id = result.id;
+    savingEditor.published = body.published;
+    if (!isCurrentEditor()) return;
+    dirty = editRevision !== savedRevision;
+    $("#save-status").textContent = dirty
+      ? "有尚未保存的更改"
+      : "所有更改已保存";
+    $("#save").textContent = editor.published ? "保存更新" : "保存草稿";
+    pub.innerHTML = `${icon("arrow")}${editor.published ? "保存并查看" : "发布游戏"}`;
+    toast(
+      dirty
+        ? publish
+          ? "已发布提交时的版本，后续更改尚未保存"
+          : "本次提交已保存，后续更改尚未保存"
+        : publish
+          ? "发布成功，让快乐被更多人发现！"
+          : "作品已保存",
+    );
+    if (publish && !dirty) location.hash = "#play/" + result.id;
     else {
       history.replaceState(null, "", "#edit/" + result.id);
-      $("#save").textContent = editor.published ? "保存更新" : "保存草稿";
     }
   } catch (error) {
-    toast(error.message);
+    if (isCurrentEditor()) {
+      $("#save-status").textContent = "保存失败，请重试";
+      toast(error.message);
+    }
   } finally {
     save.disabled = pub.disabled = false;
   }
@@ -414,6 +466,8 @@ async function playerPage(id, version) {
   };
 }
 async function render() {
+  worldCleanup?.();
+  worldCleanup = null;
   const version = ++renderVersion,
     parts = location.hash.slice(1).split("/"),
     route = parts[0];
@@ -423,7 +477,7 @@ async function render() {
       a.classList.toggle(
         "active",
         a.dataset.nav ===
-          (route === "templates"
+          (route === "world" ? "world" : route === "templates"
             ? "templates"
             : route === "mine" || route === "edit" || route === "studio"
               ? "mine"
@@ -439,6 +493,9 @@ async function render() {
       dirty = false;
       if (route === "mine") await minePage(version);
       else if (route === "templates") templatesPage();
+      else if (route === "world") {
+        worldCleanup = mountWorld(app, { currentUser, openAuth, refresh: render });
+      }
       else if (route === "play") await playerPage(parts[1], version);
       else {
         const data = await api("/api/games");

@@ -8,7 +8,7 @@ ENV NODE_ENV=production \
 
 # The application uses only Node.js built-ins; no dependency download is needed.
 RUN mkdir -p /data && chown node:node /data
-COPY --chown=node:node package.json package-lock.json server.js ./
+COPY --chown=node:node package.json package-lock.json server.js world.js ./
 COPY --chown=node:node public/ ./public/
 
 USER node

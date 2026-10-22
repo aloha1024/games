@@ -10,6 +10,6 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test test/*.test.js",
-    "check": "node --check server.js && node --check public/app.js && node --check public/templates.js"
+    "check": "node --check server.js && node --check world.js && node --check public/app.js && node --check public/templates.js && node --check public/world-client.js && node --check public/world-rules.js"
   }
 }
