@@ -13,6 +13,53 @@ npm start
 
 默认监听端口 `3000`。开发时使用 `npm run dev` 自动重启服务。数据库默认保存在 `.data/games.sqlite`，首次启动自动创建表并加入三款示例游戏。
 
+## 使用 Docker 运行
+
+需要 Docker Engine / Docker Desktop 和 Docker Compose v2，无需在宿主机安装 Node.js。
+
+在项目根目录执行：
+
+```bash
+docker compose up -d --build --wait
+```
+
+启动后，通过运行 Docker 的主机 IP 和 `3000` 端口访问网站。Compose 会等待健康检查通过后返回。容器使用 Node.js 24 官方镜像，以非 root 用户运行。
+
+可选：复制 `.env.example` 为 `.env` 后修改配置。`APP_PORT` 控制宿主机端口，例如改为 `8080` 后通过主机的 `8080` 端口访问；容器内部仍使用 `3000`。如果部署 HTTPS 站点，将 `PUBLIC_ORIGIN` 设置为真实站点来源，并设置 `COOKIE_SECURE=1`。本地 HTTP 开发保持 `COOKIE_SECURE=0`。修改配置后重新运行启动命令。
+
+```bash
+# 查看状态和日志
+docker compose ps
+docker compose logs -f games
+
+# 拉取代码更新后，重新构建并启动
+git pull
+docker compose up -d --build --wait
+
+# 停止并移除容器，保留账号和游戏数据
+docker compose down
+
+# 在独立镜像构建阶段运行检查和集成测试
+docker build --target test -t playground-h5:test .
+```
+
+数据库保存在名为 `<Compose项目名>_playground_data` 的 Docker 数据卷中，挂载到容器 `/data`。重启、重建和普通 `docker compose down` 均会保留数据。**`docker compose down -v` 会删除数据卷及全部账号和作品。** 使用相同的项目目录 / Compose 项目名重启，才能复用原数据卷。
+
+Docker 初次运行使用独立的新数据库，不会自动导入本机 `.data` 中的已有数据。镜像构建不会包含 `.data`、`.env` 或 Git 历史。需要迁移已有数据时，先停止写入，再将完整数据库目录复制到数据卷，并确保容器用户 UID/GID `1000:1000` 可写。
+
+不使用 Compose 时，也可以：
+
+```bash
+docker build -t playground-h5:local .
+docker volume create playground_data
+docker run -d --name playground --restart unless-stopped --init \
+  -p 3000:3000 \
+  --mount type=volume,src=playground_data,dst=/data \
+  playground-h5:local
+```
+
+公网部署仍需配置 HTTPS 反向代理和域名；Docker 启动本身不会提供公网域名。
+
 ## 已实现
 
 - 响应式中文游戏大厅，支持关键词搜索、分类和热门 / 最新排序。

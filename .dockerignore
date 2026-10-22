@@ -1,0 +1,10 @@
+# Send only application and test sources to the Docker build.
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!server.js
+!public/
+!public/**
+!test/
+!test/**
